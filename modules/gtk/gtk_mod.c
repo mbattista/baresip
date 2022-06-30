@@ -47,6 +47,8 @@ struct gtk_mod {
 	int call_history_length;
 	GApplication *app;
 	GtkStatusIcon *status_icon;
+	GtkWidget *main_window;
+	GtkWidget *main_window_history;
 	GtkWidget *app_menu;
 	GtkWidget *contacts_menu;
 	GtkWidget *accounts_menu;
@@ -57,6 +59,8 @@ struct gtk_mod {
 	GSList *call_windows;
 	GSList *incoming_call_menus;
 	bool clean_number;
+	bool use_status_icon;
+	bool use_main_window;
 	struct ua *ua_cur;
 	bool icon_call_missed;
 	bool icon_call_outgoing;
@@ -131,7 +135,6 @@ static void menu_on_quit(GtkMenuItem *menuItem, gpointer arg)
 	struct gtk_mod *mod = arg;
 	(void)menuItem;
 
-	gtk_widget_destroy(GTK_WIDGET(mod->app_menu));
 	g_object_unref(G_OBJECT(mod->status_icon));
 
 	mqueue_push(mod->mq, MQ_QUIT, 0);
@@ -264,6 +267,7 @@ static void add_history_menu_item(struct gtk_mod *mod, const char *uri,
 			break;
 	}
 	gtk_menu_shell_append(history_menu, item);
+	
 	g_signal_connect(G_OBJECT(item), "activate",
 		G_CALLBACK(menu_on_dial_history), mod);
 }
@@ -306,8 +310,10 @@ static void menu_on_incoming_call_reject(GtkMenuItem *menuItem,
 		struct gtk_mod *mod)
 {
 	struct call *call = g_object_get_data(G_OBJECT(menuItem), "call");
-	add_history_menu_item(mod,call_peeruri(call), CALL_REJECTED,
+	if (mod->use_status_icon) {
+		add_history_menu_item(mod,call_peeruri(call), CALL_REJECTED,
 						call_peername(call));
+	}
 	denotify_incoming_call(mod, call);
 	mqueue_push(mod->mq, MQ_HANGUP, call);
 }
@@ -549,8 +555,10 @@ static void reject_activated(GSimpleAction *action, GVariant *parameter,
 
 	if (call) {
 		denotify_incoming_call(mod, call);
-		add_history_menu_item(mod,call_peeruri(call), CALL_REJECTED,
-					call_peername(call));
+		if (mod->use_status_icon) {
+			add_history_menu_item(mod,call_peeruri(call),
+					CALL_REJECTED, call_peername(call));
+		}
 		mqueue_push(mod->mq, MQ_HANGUP, call);
 	}
 }
@@ -647,7 +655,8 @@ static void ua_event_handler(struct ua *ua,
 		denotify_incoming_call(mod, call);
 		if (!call_is_outgoing(call)
 			&& call_state(call) != CALL_STATE_TERMINATED
-			&& call_state(call) != CALL_STATE_ESTABLISHED) {
+			&& call_state(call) != CALL_STATE_ESTABLISHED
+			&& mod->use_status_icon) {
 			add_history_menu_item(mod,
 				call_peeruri(call),
 				CALL_MISSED, call_peername(call));
@@ -884,7 +893,9 @@ static void mqueue_handler(int id, void *data, void *arg)
 	case MQ_CONNECT:
 		uri = data;
 		err = ua_connect(ua, &call, NULL, uri, VIDMODE_ON);
-		add_history_menu_item(mod, uri, CALL_OUTGOING, "");
+		if (mod->use_status_icon) {
+			add_history_menu_item(mod, uri, CALL_OUTGOING, "");
+		}
 		if (err) {
 			gdk_threads_enter();
 			warning_dialog("Call failed",
@@ -905,7 +916,9 @@ static void mqueue_handler(int id, void *data, void *arg)
 	case MQ_CONNECTATTENDED:
 		ats = data;
 		err = ua_connect(ua, &call, NULL, ats->uri, VIDMODE_ON);
-		add_history_menu_item(mod, ats->uri, CALL_OUTGOING, "");
+		if (mod->use_status_icon) {
+			add_history_menu_item(mod, ats->uri, CALL_OUTGOING, "");
+		}
 		if (err) {
 			gdk_threads_enter();
 			warning_dialog("Call failed",
@@ -937,8 +950,10 @@ static void mqueue_handler(int id, void *data, void *arg)
 	case MQ_ANSWER:
 		call = data;
 		err = ua_answer(ua, call, VIDMODE_ON);
-		add_history_menu_item(mod, call_peeruri(call),
+		if (mod->use_status_icon) {
+			add_history_menu_item(mod, call_peeruri(call),
 				CALL_INCOMING, call_peername(call));
+		}
 		if (err) {
 			gdk_threads_enter();
 			warning_dialog("Call failed",
@@ -971,6 +986,8 @@ static void *gtk_thread(void *arg)
 	struct gtk_mod *mod = arg;
 	GtkMenuShell *app_menu;
 	GtkWidget *item;
+	GtkWidget *sidebar, *stack, *box, *widget, *header;
+	GtkWidget *sw, *hbox;
 	GError *err = NULL;
 	struct le *le;
 	GtkIconTheme *theme;
@@ -995,110 +1012,194 @@ static void *gtk_thread(void *arg)
 	notify_init("baresip");
 #endif
 
-	mod->status_icon = gtk_status_icon_new_from_icon_name("call-start");
-	gtk_status_icon_set_tooltip_text (mod->status_icon, "baresip");
+	if (mod->use_status_icon) {
+		mod->status_icon =
+			gtk_status_icon_new_from_icon_name("call-start");
+		gtk_status_icon_set_tooltip_text (mod->status_icon, "baresip");
 
-	g_signal_connect(G_OBJECT(mod->status_icon),
+		g_signal_connect(G_OBJECT(mod->status_icon),
 			"button_press_event",
 			G_CALLBACK(status_icon_on_button_press), mod);
-	gtk_status_icon_set_visible(mod->status_icon, TRUE);
+		gtk_status_icon_set_visible(mod->status_icon, TRUE);
 
-	mod->contacts_inited = false;
-	mod->dial_dialog = NULL;
-	mod->call_windows = NULL;
-	mod->incoming_call_menus = NULL;
-	mod->call_history_length = 0;
+	        mod->contacts_inited = false;
+	        mod->dial_dialog = NULL;
+	        mod->call_windows = NULL;
+	        mod->incoming_call_menus = NULL;
+	        mod->call_history_length = 0;
 
-	/* App menu */
-	mod->app_menu = gtk_menu_new();
-	app_menu = GTK_MENU_SHELL(mod->app_menu);
+	        /* App menu */
+	        mod->app_menu = gtk_menu_new();
+	        app_menu = GTK_MENU_SHELL(mod->app_menu);
 
-	/* Account submenu */
-	mod->accounts_menu = gtk_menu_new();
-	mod->accounts_menu_group = NULL;
-	item = gtk_menu_item_new_with_mnemonic("_Account");
-	gtk_menu_shell_append(app_menu, item);
-	gtk_menu_item_set_submenu(GTK_MENU_ITEM(item),
-			mod->accounts_menu);
+	        /* Account submenu */
+	        mod->accounts_menu = gtk_menu_new();
+	        mod->accounts_menu_group = NULL;
+	        item = gtk_menu_item_new_with_mnemonic("_Account");
+	        gtk_menu_shell_append(app_menu, item);
+	        gtk_menu_item_set_submenu(GTK_MENU_ITEM(item),
+                        mod->accounts_menu);
 
-	/* Add accounts to submenu */
-	for (le = list_head(uag_list()); le; le = le->next) {
-		struct ua *ua = le->data;
-		accounts_menu_add_item(mod, ua);
+	        /* Add accounts to submenu */
+	        for (le = list_head(uag_list()); le; le = le->next) {
+	                struct ua *ua = le->data;
+	                accounts_menu_add_item(mod, ua);
+	        }
+
+	        /* Status submenu */
+	        mod->status_menu = gtk_menu_new();
+	        item = gtk_menu_item_new_with_mnemonic("_Status");
+	        gtk_menu_shell_append(GTK_MENU_SHELL(app_menu), item);
+	        gtk_menu_item_set_submenu(GTK_MENU_ITEM(item), mod->status_menu);
+
+	        /* Open */
+	        item = gtk_radio_menu_item_new_with_label(NULL, "Open");
+	        g_object_set_data(G_OBJECT(item), "presence",
+                        GINT_TO_POINTER(PRESENCE_OPEN));
+	        g_signal_connect(item, "activate",
+                        G_CALLBACK(menu_on_presence_set), mod);
+	        gtk_menu_shell_append(GTK_MENU_SHELL(mod->status_menu), item);
+	        gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), TRUE);
+
+	        /* Closed */
+	        item = gtk_radio_menu_item_new_with_label_from_widget(
+                        GTK_RADIO_MENU_ITEM(item), "Closed");
+	        g_object_set_data(G_OBJECT(item), "presence",
+                        GINT_TO_POINTER(PRESENCE_CLOSED));
+	        g_signal_connect(item, "activate",
+                        G_CALLBACK(menu_on_presence_set), mod);
+	        gtk_menu_shell_append(GTK_MENU_SHELL(mod->status_menu), item);
+
+	        gtk_menu_shell_append(app_menu, gtk_separator_menu_item_new());
+
+	        /* Dial */
+	        item = gtk_menu_item_new_with_mnemonic("_Dial...");
+	        gtk_menu_shell_append(app_menu, item);
+	        g_signal_connect(G_OBJECT(item), "activate",
+                        G_CALLBACK(menu_on_dial), mod);
+
+	        /* Dial contact */
+	        mod->contacts_menu = gtk_menu_new();
+	        item = gtk_menu_item_new_with_mnemonic("Dial _contact");
+	        gtk_menu_shell_append(app_menu, item);
+	        gtk_menu_item_set_submenu(GTK_MENU_ITEM(item),
+                        mod->contacts_menu);
+
+	        /* Caller history */
+	        mod->history_menu = gtk_menu_new();
+	        item = gtk_menu_item_new_with_mnemonic("Call _history");
+	        gtk_menu_shell_append(app_menu, item);
+	        gtk_menu_item_set_submenu(GTK_MENU_ITEM(item),
+                        mod->history_menu);
+
+	        gtk_menu_shell_append(app_menu, gtk_separator_menu_item_new());
+
+	        theme = gtk_icon_theme_get_default();
+	        mod->icon_call_incoming = gtk_icon_theme_has_icon(theme,
+                                                "call-incoming-symbolic");
+	        mod->icon_call_outgoing = gtk_icon_theme_has_icon(theme,
+                                                "call-outgoing-symbolic");
+	        mod->icon_call_missed = gtk_icon_theme_has_icon(theme,
+                                                "call-missed-symbolic");
+
+	        /* About */
+	        item = gtk_menu_item_new_with_mnemonic("A_bout");
+	        g_signal_connect(G_OBJECT(item), "activate",
+                        G_CALLBACK(menu_on_about), mod);
+	        gtk_menu_shell_append(app_menu, item);
+
+	        gtk_menu_shell_append(app_menu, gtk_separator_menu_item_new());
+
+	        /* Quit */
+	        item = gtk_menu_item_new_with_mnemonic("_Quit");
+	        g_signal_connect(G_OBJECT(item), "activate",
+                        G_CALLBACK(menu_on_quit), mod);
+	        gtk_menu_shell_append(app_menu, item);
+
+	        g_action_map_add_action_entries(G_ACTION_MAP(mod->app),
+                        app_entries, G_N_ELEMENTS(app_entries), mod);
+
+
 	}
+	if (mod->use_main_window) {
+		mod->main_window =
+			gtk_window_new(GTK_WINDOW_TOPLEVEL);
+		header = gtk_header_bar_new();
+		gtk_header_bar_set_show_close_button(GTK_HEADER_BAR(header), TRUE);
+		gtk_window_set_titlebar(GTK_WINDOW(mod->main_window), header);
+		gtk_window_set_title(GTK_WINDOW(mod->main_window), "BareSIP");
+		gtk_window_set_icon_name(GTK_WINDOW(mod->main_window), "call-start");
 
-	/* Status submenu */
-	mod->status_menu = gtk_menu_new();
-	item = gtk_menu_item_new_with_mnemonic("_Status");
-	gtk_menu_shell_append(GTK_MENU_SHELL(app_menu), item);
-	gtk_menu_item_set_submenu(GTK_MENU_ITEM(item), mod->status_menu);
+		gtk_window_set_default_size (GTK_WINDOW(mod->main_window), 500, 500);
+                g_signal_connect(mod->main_window, "destroy",
+                        G_CALLBACK(menu_on_quit), mod);
 
-	/* Open */
-	item = gtk_radio_menu_item_new_with_label(NULL, "Open");
-	g_object_set_data(G_OBJECT(item), "presence",
-			GINT_TO_POINTER(PRESENCE_OPEN));
-	g_signal_connect(item, "activate",
-			G_CALLBACK(menu_on_presence_set), mod);
-	gtk_menu_shell_append(GTK_MENU_SHELL(mod->status_menu), item);
-	gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(item), TRUE);
+    
+		box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+		sidebar = gtk_stack_sidebar_new();
+		gtk_box_pack_start(GTK_BOX(box), sidebar, FALSE, FALSE, 0);
 
-	/* Closed */
-	item = gtk_radio_menu_item_new_with_label_from_widget(
-			GTK_RADIO_MENU_ITEM(item), "Closed");
-	g_object_set_data(G_OBJECT(item), "presence",
-			GINT_TO_POINTER(PRESENCE_CLOSED));
-	g_signal_connect(item, "activate",
-			G_CALLBACK(menu_on_presence_set), mod);
-	gtk_menu_shell_append(GTK_MENU_SHELL(mod->status_menu), item);
+		stack = gtk_stack_new();
+		gtk_stack_set_transition_type(GTK_STACK(stack), GTK_STACK_TRANSITION_TYPE_SLIDE_UP_DOWN);
+		gtk_stack_sidebar_set_stack(GTK_STACK_SIDEBAR(sidebar), GTK_STACK(stack));
 
-	gtk_menu_shell_append(app_menu, gtk_separator_menu_item_new());
+		widget = gtk_separator_new(GTK_ORIENTATION_VERTICAL);
+		gtk_box_pack_start(GTK_BOX(box), widget, FALSE, FALSE, 0);
+		gtk_box_pack_start(GTK_BOX(box), stack, TRUE, TRUE, 0);
 
-	/* Dial */
-	item = gtk_menu_item_new_with_mnemonic("_Dial...");
-	gtk_menu_shell_append(app_menu, item);
-	g_signal_connect(G_OBJECT(item), "activate",
-			G_CALLBACK(menu_on_dial), mod);
+		widget = gtk_label_new("Este assistente ira ajuda-lo a Gerenciar um Banco de Dados Mais Rapido e melhor.");
+		gtk_stack_add_named(GTK_STACK(stack), widget, "Bem-vindos");
+		gtk_container_child_set(GTK_CONTAINER(stack), widget, "title", "Bem-vindos", NULL);
 
-	/* Dial contact */
-	mod->contacts_menu = gtk_menu_new();
-	item = gtk_menu_item_new_with_mnemonic("Dial _contact");
-	gtk_menu_shell_append(app_menu, item);
-	gtk_menu_item_set_submenu(GTK_MENU_ITEM(item),
-			mod->contacts_menu);
+//		mod->main_window_history = gtk_list_box_new();
+//		gtk_list_box_set_selection_mode(GTK_LIST_BOX(mod->main_window_history), GTK_SELECTION_NONE);
+		sw = gtk_scrolled_window_new(NULL, NULL);
+		gtk_widget_set_hexpand(sw, TRUE);
+		gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sw), GTK_POLICY_NEVER, GTK_POLICY_ALWAYS);
+//		gtk_container_add(GTK_CONTAINER(sw), mod->main_window_history);
 
-	/* Caller history */
-	mod->history_menu = gtk_menu_new();
-	item = gtk_menu_item_new_with_mnemonic("Call _history");
-	gtk_menu_shell_append(app_menu, item);
-	gtk_menu_item_set_submenu(GTK_MENU_ITEM(item),
-			mod->history_menu);
+		gtk_stack_add_named(GTK_STACK(stack), sw, "Bem-vindos2");
+		gtk_container_child_set(GTK_CONTAINER(stack), sw, "title", "Bem-vindos2", NULL);
+		gtk_container_add(GTK_CONTAINER(mod->main_window), box);
 
-	gtk_menu_shell_append(app_menu, gtk_separator_menu_item_new());
+		GtkListStore *store;
+		GtkTreeIter iter;
+		GtkTreeViewColumn *column;
+		GtkWidget *treeview2;
+		GtkTreeModel *model;
+		GtkCellRenderer *cr_text, *cr_pix;
 
-	theme = gtk_icon_theme_get_default();
-	mod->icon_call_incoming = gtk_icon_theme_has_icon(theme,
-						"call-incoming-symbolic");
-	mod->icon_call_outgoing = gtk_icon_theme_has_icon(theme,
-						"call-outgoing-symbolic");
-	mod->icon_call_missed = gtk_icon_theme_has_icon(theme,
-						"call-missed-symbolic");
+                store = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_STRING);
+                model = GTK_TREE_MODEL(store);
+                treeview2 = gtk_tree_view_new_with_model(model);
+                gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(treeview2), FALSE);
+                gtk_container_add(GTK_CONTAINER(sw), treeview2);
 
-	/* About */
-	item = gtk_menu_item_new_with_mnemonic("A_bout");
-	g_signal_connect(G_OBJECT(item), "activate",
-			G_CALLBACK(menu_on_about), mod);
-	gtk_menu_shell_append(app_menu, item);
+		                column = gtk_tree_view_column_new ();
+                gtk_tree_view_append_column(GTK_TREE_VIEW(treeview2), column);
+                cr_pix = gtk_cell_renderer_pixbuf_new ();
+                gtk_tree_view_column_pack_start (column, cr_pix, FALSE);
+                gtk_tree_view_column_set_attributes (column, cr_pix,
+                                       "icon-name", 0, NULL);
 
-	gtk_menu_shell_append(app_menu, gtk_separator_menu_item_new());
+                // Add a new row to the model
+                gtk_list_store_append (store, &iter);
+                gtk_list_store_set (store, &iter, 0, "call-start", 1, "start", -1);
 
-	/* Quit */
-	item = gtk_menu_item_new_with_mnemonic("_Quit");
-	g_signal_connect(G_OBJECT(item), "activate",
-			G_CALLBACK(menu_on_quit), mod);
-	gtk_menu_shell_append(app_menu, item);
+		
+		column = gtk_tree_view_column_new();
+		gtk_tree_view_append_column(GTK_TREE_VIEW(treeview2), column);
 
-	g_action_map_add_action_entries(G_ACTION_MAP(mod->app),
-			app_entries, G_N_ELEMENTS(app_entries), mod);
+		cr_text = gtk_cell_renderer_text_new();
+		gtk_tree_view_column_pack_start(column, cr_text, TRUE);
+		gtk_tree_view_column_add_attribute(column, cr_text, "text", 1);
+
+		// Add a new row to the model
+		gtk_list_store_append (store, &iter);
+		gtk_list_store_set (store, &iter, 0, "call-start", 1, "start", -1);
+
+		gtk_widget_show_all(mod->main_window);
+	}
 
 	info("gtk_menu starting\n");
 
@@ -1267,7 +1368,13 @@ static int module_init(void)
 	int err;
 
 	mod_obj.clean_number = false;
+	mod_obj.use_status_icon = true;
+	mod_obj.use_main_window = false;
 	conf_get_bool(conf_cur(), "gtk_clean_number", &mod_obj.clean_number);
+	conf_get_bool(conf_cur(), "gtk_use_status_icon",
+			&mod_obj.use_status_icon);
+	conf_get_bool(conf_cur(), "gtk_use_main_window",
+			&mod_obj.use_main_window);
 
 	err = mqueue_alloc(&mod_obj.mq, mqueue_handler, &mod_obj);
 	if (err)
