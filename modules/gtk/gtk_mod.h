@@ -56,7 +56,8 @@ bool call_window_is_for_call(struct call_window *, struct call *);
 
 /* Dial Dialog */
 struct dial_dialog *dial_dialog_alloc(struct gtk_mod *,
-					struct call *attended_call);
+					struct call *attended_call,
+					bool is_for_conference_call);
 void dial_dialog_show(struct dial_dialog *);
 
 /* Call transfer dialog */

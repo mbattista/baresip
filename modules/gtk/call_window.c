@@ -24,11 +24,12 @@ struct call_window {
 	} vu;
 	struct transfer_dialog *transfer_dialog;
 	struct dial_dialog *attended_transfer_dial;
+	struct dial_dialog *conference_dial;
 	GtkWidget *window;
 	GtkLabel *status;
 	GtkLabel *duration;
 	struct {
-		GtkWidget *hangup, *transfer, *hold, *mute, *attended_transfer;
+		GtkWidget *hangup, *transfer, *hold, *mute, *attended_transfer, *conference_call;
 	} buttons;
 	struct {
 		GtkProgressBar *enc, *dec;
@@ -249,8 +250,18 @@ static void call_on_attended_transfer(GtkToggleButton *btn,
 	(void)btn;
 	if (!win->attended_transfer_dial)
 		win->attended_transfer_dial =
-					dial_dialog_alloc(win->mod, win->call);
+					dial_dialog_alloc(win->mod, win->call, false);
 	dial_dialog_show(win->attended_transfer_dial);
+}
+
+static void call_on_conference_call(GtkToggleButton *btn,
+						struct call_window *win)
+{
+	(void)btn;
+	if (!win->conference_dial)
+		win->conference_dial =
+					dial_dialog_alloc(win->mod, win->call, true);
+	dial_dialog_show(win->conference_dial);
 }
 
 
@@ -369,6 +380,7 @@ static void call_window_destructor(void *arg)
 	gtk_widget_destroy(window->window);
 	mem_deref(window->transfer_dialog);
 	mem_deref(window->attended_transfer_dial);
+	mem_deref(window->conference_dial);
 	gdk_threads_leave();
 
 	if (window->duration_timer_tag)
@@ -496,6 +508,18 @@ struct call_window *call_window_new(struct call *call, struct gtk_mod *mod,
 	gtk_widget_set_tooltip_text(button,
 		"Please put the call on 'Hold' to enable attended transfer");
 
+	/* Conference call */
+	button = gtk_button_new_with_label("Init Conference");
+	win->buttons.conference_call = button;
+	gtk_box_pack_end(GTK_BOX(button_box), button, FALSE, TRUE, 0);
+		g_signal_connect(button, "clicked",
+				G_CALLBACK(call_on_conference_call), win);
+	image = gtk_image_new_from_icon_name("random", GTK_ICON_SIZE_BUTTON);
+	gtk_button_set_image(GTK_BUTTON(button), image);
+	gtk_widget_set_sensitive (button, FALSE);
+	gtk_widget_set_tooltip_text(button,
+		"Initialize conference call");
+
 	/* Hold */
 	button = gtk_toggle_button_new_with_label("Hold");
 	win->buttons.hold = button;
@@ -532,6 +556,7 @@ struct call_window *call_window_new(struct call *call, struct gtk_mod *mod,
 	win->window = window;
 	win->transfer_dialog = NULL;
 	win->attended_transfer_dial = NULL;
+	win->conference_dial = NULL;
 	win->status = GTK_LABEL(status);
 	win->duration = GTK_LABEL(duration);
 	win->closed = false;
@@ -586,6 +611,7 @@ void call_window_closed(struct call_window *win, const char *reason)
 	call_window_set_status(win, status);
 	win->transfer_dialog = mem_deref(win->transfer_dialog);
 	win->attended_transfer_dial = mem_deref(win->attended_transfer_dial);
+	win->conference_dial = mem_deref(win->conference_dial);
 	win->call = mem_deref(win->call);
 	win->attended_call = mem_deref(win->attended_call);
 	win->closed = true;

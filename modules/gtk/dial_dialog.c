@@ -18,6 +18,7 @@ struct dial_dialog {
 	GtkWidget *dialog;
 	GtkComboBox *uri_combobox;
 	struct call *attended_call;
+	bool is_for_conference_call;
 };
 
 
@@ -57,7 +58,8 @@ static void destructor(void *arg)
 
 
 struct dial_dialog *dial_dialog_alloc(struct gtk_mod *mod,
-				struct call *attended_call)
+				struct call *attended_call,
+				bool is_for_conference_call)
 {
 	struct dial_dialog *dd;
 	GtkWidget *dial;
@@ -104,6 +106,7 @@ struct dial_dialog *dial_dialog_alloc(struct gtk_mod *mod,
 	dd->uri_combobox = GTK_COMBO_BOX(uri_combobox);
 	dd->mod = mod;
 	dd->attended_call = attended_call;
+	dd->is_for_conference_call = is_for_conference_call;
 
 	return dd;
 }

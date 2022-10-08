@@ -144,7 +144,7 @@ static void menu_on_dial(GtkMenuItem *menuItem, gpointer arg)
 	struct gtk_mod *mod = arg;
 	(void)menuItem;
 	if (!mod->dial_dialog)
-		 mod->dial_dialog = dial_dialog_alloc(mod, NULL);
+		 mod->dial_dialog = dial_dialog_alloc(mod, NULL, false);
 	dial_dialog_show(mod->dial_dialog);
 }
 
